@@ -8,13 +8,12 @@ async function connectToDatabase() {
   }
 
   try {
-    console.log('Connecting to MongoDB...');
     const connection = await mongoose.connect(process.env.MONGODB_URI, {
       useNewUrlParser: true,
-      useUnifiedTopology: true
+      useUnifiedTopology: true,
+      bufferCommands: false,
     });
 
-    console.log('Connected to MongoDB');
     cachedConnection = connection;
     return connection;
   } catch (error) {
@@ -23,6 +22,4 @@ async function connectToDatabase() {
   }
 }
 
-module.exports = {
-  connectToDatabase
-}; 
+module.exports = { connectToDatabase }; 
