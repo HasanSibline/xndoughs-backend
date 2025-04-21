@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const DatabaseManager = require('./utils/databaseManager');
 
 // Load environment variables
 dotenv.config();
@@ -9,7 +10,14 @@ dotenv.config();
 const app = express();
 
 // Enable CORS
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  credentials: false
+}));
+
+// Parse JSON bodies
 app.use(express.json());
 
 // Cached connection
@@ -17,7 +25,6 @@ let cachedConnection = null;
 
 const connectToDatabase = async () => {
   if (cachedConnection) {
-    console.log('Using cached database connection');
     return cachedConnection;
   }
 
@@ -25,12 +32,20 @@ const connectToDatabase = async () => {
     console.log('Connecting to MongoDB...');
     const connection = await mongoose.connect(process.env.MONGODB_URI, {
       useNewUrlParser: true,
-      useUnifiedTopology: true,
-      bufferCommands: false,
+      useUnifiedTopology: true
     });
 
     console.log('Connected to MongoDB');
     cachedConnection = connection;
+    
+    // Only initialize monitoring if explicitly enabled
+    if (process.env.ENABLE_DB_MONITORING === 'true') {
+      console.log('Initializing database monitoring...');
+      DatabaseManager.scheduleMaintenanceTasks().catch(err => {
+        console.error('Failed to initialize monitoring:', err);
+      });
+    }
+    
     return connection;
   } catch (error) {
     console.error('MongoDB connection error:', error);
@@ -43,7 +58,7 @@ const reservationSchema = new mongoose.Schema({
   name: String,
   phone: String,
   branch: String,
-  pickupTime: String,
+  time: String,
   status: {
     type: String,
     default: 'pending'
@@ -52,13 +67,14 @@ const reservationSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now
-  }
+  },
+  cancellationReason: String
 });
 
 const Reservation = mongoose.models.Reservation || mongoose.model('Reservation', reservationSchema);
 
 // Health check endpoint
-app.get('/', async (req, res) => {
+app.get('/api/health', async (req, res) => {
   try {
     await connectToDatabase();
     res.json({
@@ -68,12 +84,82 @@ app.get('/', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    res.json({
+    res.status(500).json({
       status: 'error',
       message: 'XnDoughs API is running but database connection failed',
       mongodb: 'disconnected',
       error: error.message,
       timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Root endpoint redirect to health
+app.get('/', (req, res) => {
+  res.redirect('/api/health');
+});
+
+// API root endpoint
+app.get('/api', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'XnDoughs API root endpoint',
+    endpoints: [
+      '/api/health',
+      '/api/reservations',
+      '/api/reservations/:id',
+      '/api/mongodb-test'
+    ]
+  });
+});
+
+// MongoDB test endpoint
+app.get('/api/mongodb-test', async (req, res) => {
+  try {
+    await connectToDatabase();
+    const connection = mongoose.connection;
+    
+    // Get connection stats
+    const stats = await connection.db.stats();
+    
+    // Test a simple query
+    const testQuery = await Reservation.find().limit(1);
+    
+    res.json({
+      status: 'ok',
+      message: 'MongoDB connection test',
+      connection: {
+        host: connection.host,
+        port: connection.port,
+        name: connection.name,
+        readyState: connection.readyState,
+        models: Object.keys(connection.models)
+      },
+      stats: {
+        collections: stats.collections,
+        views: stats.views,
+        objects: stats.objects,
+        avgObjSize: stats.avgObjSize,
+        dataSize: stats.dataSize,
+        storageSize: stats.storageSize,
+        indexes: stats.indexes,
+        indexSize: stats.indexSize
+      },
+      testQuery: {
+        success: true,
+        count: testQuery.length
+      }
+    });
+  } catch (error) {
+    console.error('MongoDB test error:', error);
+    res.status(500).json({
+      status: 'error',
+      message: 'MongoDB connection test failed',
+      error: {
+        name: error.name,
+        message: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      }
     });
   }
 });
@@ -85,74 +171,72 @@ app.get('/api/reservations', async (req, res) => {
     const reservations = await Reservation.find().sort({ createdAt: -1 });
     res.json(reservations);
   } catch (error) {
+    console.error('Error fetching reservations:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
 app.post('/api/reservations', async (req, res) => {
   try {
+    console.log('Received reservation request:', {
+      body: req.body,
+      headers: req.headers,
+      method: req.method,
+      url: req.url
+    });
+    
     await connectToDatabase();
     const reservation = new Reservation(req.body);
+    
+    console.log('Created reservation object:', reservation);
+    
     const savedReservation = await reservation.save();
+    console.log('Saved reservation:', savedReservation);
+    
     res.status(201).json(savedReservation);
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    console.error('Error creating reservation:', {
+      error: error.message,
+      stack: error.stack,
+      name: error.name,
+      code: error.code
+    });
+    res.status(400).json({ 
+      message: error.message,
+      type: error.name,
+      code: error.code 
+    });
   }
 });
 
 app.put('/api/reservations/:id', async (req, res) => {
   try {
     await connectToDatabase();
-    const { id } = req.params;
     const updatedReservation = await Reservation.findByIdAndUpdate(
-      id,
+      req.params.id,
       req.body,
       { new: true }
     );
+    if (!updatedReservation) {
+      return res.status(404).json({ message: 'Reservation not found' });
+    }
     res.json(updatedReservation);
   } catch (error) {
+    console.error('Error updating reservation:', error);
     res.status(400).json({ message: error.message });
   }
 });
 
-// Get reservations by status
-app.get('/api/reservations/status/:status', async (req, res) => {
+app.delete('/api/reservations/:id', async (req, res) => {
   try {
     await connectToDatabase();
-    const { status } = req.params;
-    const reservations = await Reservation.find({ status }).sort({ createdAt: -1 });
-    res.json(reservations);
+    const deletedReservation = await Reservation.findByIdAndDelete(req.params.id);
+    if (!deletedReservation) {
+      return res.status(404).json({ message: 'Reservation not found' });
+    }
+    res.json({ message: 'Reservation deleted successfully' });
   } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// Get reservations by branch
-app.get('/api/reservations/branch/:branch', async (req, res) => {
-  try {
-    await connectToDatabase();
-    const { branch } = req.params;
-    const reservations = await Reservation.find({ branch }).sort({ createdAt: -1 });
-    res.json(reservations);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// Delete old reservations
-app.delete('/api/reservations/old', async (req, res) => {
-  try {
-    await connectToDatabase();
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    await Reservation.deleteMany({
-      createdAt: { $lt: thirtyDaysAgo },
-      status: { $in: ['confirmed', 'cancelled'] }
-    });
-    
-    res.json({ message: 'Old reservations deleted successfully' });
-  } catch (error) {
+    console.error('Error deleting reservation:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -163,8 +247,16 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Something went wrong!' });
 });
 
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-}); 
+// Handle OPTIONS requests
+app.options('*', cors());
+
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+// Export the Express API
+module.exports = app; 
