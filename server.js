@@ -2,29 +2,45 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const DatabaseManager = require('./utils/databaseManager');
 
 // Load environment variables
 dotenv.config();
 
 const app = express();
 
-// Enable CORS
+// Enable CORS with specific options
 app.use(cors({
-  origin: '*',
+  origin: ['https://xndoughs.quantumbytech.com', 'http://localhost:5173'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  credentials: false
+  allowedHeaders: ['Content-Type', 'Accept', 'Origin'],
+  credentials: true
 }));
 
-// Parse JSON bodies
+// Handle preflight requests
+app.options('*', cors());
+
+// Add request logging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  next();
+});
+
 app.use(express.json());
+
+// Add error handling for JSON parsing
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ message: 'Invalid JSON payload' });
+  }
+  next();
+});
 
 // Cached connection
 let cachedConnection = null;
 
 const connectToDatabase = async () => {
   if (cachedConnection) {
+    console.log('Using cached database connection');
     return cachedConnection;
   }
 
@@ -32,20 +48,12 @@ const connectToDatabase = async () => {
     console.log('Connecting to MongoDB...');
     const connection = await mongoose.connect(process.env.MONGODB_URI, {
       useNewUrlParser: true,
-      useUnifiedTopology: true
+      useUnifiedTopology: true,
+      bufferCommands: false,
     });
 
     console.log('Connected to MongoDB');
     cachedConnection = connection;
-    
-    // Only initialize monitoring if explicitly enabled
-    if (process.env.ENABLE_DB_MONITORING === 'true') {
-      console.log('Initializing database monitoring...');
-      DatabaseManager.scheduleMaintenanceTasks().catch(err => {
-        console.error('Failed to initialize monitoring:', err);
-      });
-    }
-    
     return connection;
   } catch (error) {
     console.error('MongoDB connection error:', error);
@@ -55,26 +63,50 @@ const connectToDatabase = async () => {
 
 // Reservation Schema
 const reservationSchema = new mongoose.Schema({
-  name: String,
-  phone: String,
-  branch: String,
-  time: String,
+  name: {
+    type: String,
+    required: [true, 'Name is required'],
+    trim: true
+  },
+  phone: {
+    type: String,
+    required: [true, 'Phone number is required'],
+    validate: {
+      validator: function(v) {
+        return /^961\d{7,8}$/.test(v);
+      },
+      message: props => `${props.value} is not a valid Lebanese phone number!`
+    }
+  },
+  branch: {
+    type: String,
+    required: [true, 'Branch is required'],
+    enum: ['Clemenceau', 'Jal El Dib', 'Kfarehbeb', 'Bliss']
+  },
+  time: {
+    type: String,
+    required: [true, 'Pickup time is required']
+  },
   status: {
     type: String,
+    enum: ['pending', 'confirmed', 'cancelled'],
     default: 'pending'
   },
   otp: String,
+  cancellationReason: {
+    type: String,
+    enum: ['customer_changed_mind', 'no_show', 'duplicate_order', 'store_capacity', 'technical_issue', 'other']
+  },
   createdAt: {
     type: Date,
     default: Date.now
-  },
-  cancellationReason: String
+  }
 });
 
 const Reservation = mongoose.models.Reservation || mongoose.model('Reservation', reservationSchema);
 
 // Health check endpoint
-app.get('/api/health', async (req, res) => {
+app.get('/', async (req, res) => {
   try {
     await connectToDatabase();
     res.json({
@@ -84,82 +116,12 @@ app.get('/api/health', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    res.status(500).json({
+    res.json({
       status: 'error',
       message: 'XnDoughs API is running but database connection failed',
       mongodb: 'disconnected',
       error: error.message,
       timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// Root endpoint redirect to health
-app.get('/', (req, res) => {
-  res.redirect('/api/health');
-});
-
-// API root endpoint
-app.get('/api', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'XnDoughs API root endpoint',
-    endpoints: [
-      '/api/health',
-      '/api/reservations',
-      '/api/reservations/:id',
-      '/api/mongodb-test'
-    ]
-  });
-});
-
-// MongoDB test endpoint
-app.get('/api/mongodb-test', async (req, res) => {
-  try {
-    await connectToDatabase();
-    const connection = mongoose.connection;
-    
-    // Get connection stats
-    const stats = await connection.db.stats();
-    
-    // Test a simple query
-    const testQuery = await Reservation.find().limit(1);
-    
-    res.json({
-      status: 'ok',
-      message: 'MongoDB connection test',
-      connection: {
-        host: connection.host,
-        port: connection.port,
-        name: connection.name,
-        readyState: connection.readyState,
-        models: Object.keys(connection.models)
-      },
-      stats: {
-        collections: stats.collections,
-        views: stats.views,
-        objects: stats.objects,
-        avgObjSize: stats.avgObjSize,
-        dataSize: stats.dataSize,
-        storageSize: stats.storageSize,
-        indexes: stats.indexes,
-        indexSize: stats.indexSize
-      },
-      testQuery: {
-        success: true,
-        count: testQuery.length
-      }
-    });
-  } catch (error) {
-    console.error('MongoDB test error:', error);
-    res.status(500).json({
-      status: 'error',
-      message: 'MongoDB connection test failed',
-      error: {
-        name: error.name,
-        message: error.message,
-        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-      }
     });
   }
 });
@@ -171,40 +133,53 @@ app.get('/api/reservations', async (req, res) => {
     const reservations = await Reservation.find().sort({ createdAt: -1 });
     res.json(reservations);
   } catch (error) {
-    console.error('Error fetching reservations:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
 app.post('/api/reservations', async (req, res) => {
   try {
-    console.log('Received reservation request:', {
-      body: req.body,
-      headers: req.headers,
-      method: req.method,
-      url: req.url
-    });
-    
     await connectToDatabase();
+    
+    console.log('Received reservation request:', req.body);
+    
+    // Validate required fields
+    const { name, phone, branch, time } = req.body;
+    if (!name || !phone || !branch || !time) {
+      console.error('Missing required fields:', { name, phone, branch, time });
+      return res.status(400).json({ 
+        message: 'Missing required fields',
+        details: {
+          name: !name ? 'Name is required' : null,
+          phone: !phone ? 'Phone is required' : null,
+          branch: !branch ? 'Branch is required' : null,
+          time: !time ? 'Time is required' : null
+        }
+      });
+    }
+
+    // Create and save the reservation
     const reservation = new Reservation(req.body);
-    
-    console.log('Created reservation object:', reservation);
-    
     const savedReservation = await reservation.save();
-    console.log('Saved reservation:', savedReservation);
+    
+    console.log('Reservation created successfully:', savedReservation);
     
     res.status(201).json(savedReservation);
   } catch (error) {
-    console.error('Error creating reservation:', {
-      error: error.message,
-      stack: error.stack,
-      name: error.name,
-      code: error.code
-    });
-    res.status(400).json({ 
-      message: error.message,
-      type: error.name,
-      code: error.code 
+    console.error('Error creating reservation:', error);
+    
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        message: 'Validation error',
+        details: Object.values(error.errors).map(err => err.message)
+      });
+    }
+    
+    // Handle other errors
+    res.status(500).json({ 
+      message: 'Error creating reservation',
+      error: error.message
     });
   }
 });
@@ -212,31 +187,56 @@ app.post('/api/reservations', async (req, res) => {
 app.put('/api/reservations/:id', async (req, res) => {
   try {
     await connectToDatabase();
+    const { id } = req.params;
     const updatedReservation = await Reservation.findByIdAndUpdate(
-      req.params.id,
+      id,
       req.body,
       { new: true }
     );
-    if (!updatedReservation) {
-      return res.status(404).json({ message: 'Reservation not found' });
-    }
     res.json(updatedReservation);
   } catch (error) {
-    console.error('Error updating reservation:', error);
     res.status(400).json({ message: error.message });
   }
 });
 
-app.delete('/api/reservations/:id', async (req, res) => {
+// Get reservations by status
+app.get('/api/reservations/status/:status', async (req, res) => {
   try {
     await connectToDatabase();
-    const deletedReservation = await Reservation.findByIdAndDelete(req.params.id);
-    if (!deletedReservation) {
-      return res.status(404).json({ message: 'Reservation not found' });
-    }
-    res.json({ message: 'Reservation deleted successfully' });
+    const { status } = req.params;
+    const reservations = await Reservation.find({ status }).sort({ createdAt: -1 });
+    res.json(reservations);
   } catch (error) {
-    console.error('Error deleting reservation:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get reservations by branch
+app.get('/api/reservations/branch/:branch', async (req, res) => {
+  try {
+    await connectToDatabase();
+    const { branch } = req.params;
+    const reservations = await Reservation.find({ branch }).sort({ createdAt: -1 });
+    res.json(reservations);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete old reservations
+app.delete('/api/reservations/old', async (req, res) => {
+  try {
+    await connectToDatabase();
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    await Reservation.deleteMany({
+      createdAt: { $lt: thirtyDaysAgo },
+      status: { $in: ['confirmed', 'cancelled'] }
+    });
+    
+    res.json({ message: 'Old reservations deleted successfully' });
+  } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
@@ -247,16 +247,8 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: 'Something went wrong!' });
 });
 
-// Handle OPTIONS requests
-app.options('*', cors());
-
-// For local development
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-}
-
-// Export the Express API
-module.exports = app; 
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+}); 
