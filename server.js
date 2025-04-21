@@ -126,7 +126,61 @@ app.get('/', async (req, res) => {
   }
 });
 
-// Routes
+// Routes - Specific routes first
+app.get('/api/reservations/status/:status', async (req, res) => {
+  try {
+    await connectToDatabase();
+    const { status } = req.params;
+    const reservations = await Reservation.find({ status }).sort({ createdAt: -1 });
+    res.json(reservations);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get('/api/reservations/branch/:branch', async (req, res) => {
+  try {
+    await connectToDatabase();
+    const { branch } = req.params;
+    const reservations = await Reservation.find({ branch }).sort({ createdAt: -1 });
+    res.json(reservations);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.delete('/api/reservations/old', async (req, res) => {
+  try {
+    await connectToDatabase();
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    await Reservation.deleteMany({
+      createdAt: { $lt: thirtyDaysAgo },
+      status: { $in: ['confirmed', 'cancelled'] }
+    });
+    
+    res.json({ message: 'Old reservations deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.get('/api/reservations/:id', async (req, res) => {
+  try {
+    await connectToDatabase();
+    const { id } = req.params;
+    const reservation = await Reservation.findById(id);
+    if (!reservation) {
+      return res.status(404).json({ message: 'Reservation not found' });
+    }
+    res.json(reservation);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// General routes after specific ones
 app.get('/api/reservations', async (req, res) => {
   try {
     await connectToDatabase();
@@ -193,51 +247,12 @@ app.put('/api/reservations/:id', async (req, res) => {
       req.body,
       { new: true }
     );
+    if (!updatedReservation) {
+      return res.status(404).json({ message: 'Reservation not found' });
+    }
     res.json(updatedReservation);
   } catch (error) {
     res.status(400).json({ message: error.message });
-  }
-});
-
-// Get reservations by status
-app.get('/api/reservations/status/:status', async (req, res) => {
-  try {
-    await connectToDatabase();
-    const { status } = req.params;
-    const reservations = await Reservation.find({ status }).sort({ createdAt: -1 });
-    res.json(reservations);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// Get reservations by branch
-app.get('/api/reservations/branch/:branch', async (req, res) => {
-  try {
-    await connectToDatabase();
-    const { branch } = req.params;
-    const reservations = await Reservation.find({ branch }).sort({ createdAt: -1 });
-    res.json(reservations);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// Delete old reservations
-app.delete('/api/reservations/old', async (req, res) => {
-  try {
-    await connectToDatabase();
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    await Reservation.deleteMany({
-      createdAt: { $lt: thirtyDaysAgo },
-      status: { $in: ['confirmed', 'cancelled'] }
-    });
-    
-    res.json({ message: 'Old reservations deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
   }
 });
 
